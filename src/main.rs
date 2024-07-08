@@ -16,6 +16,7 @@ use fuzzy_matcher::FuzzyMatcher;
 const MAX_VISIBLE: usize = 10;
 const ADDRESS: &str = "127.0.0.1:38451";
 
+// Macro to clone variables for use in closures
 macro_rules! clone {
     (@param _) => ( _ );
     (@param $x:ident) => ( $x );
@@ -32,19 +33,25 @@ macro_rules! clone {
         }
     );
 }
+
 fn main() {
+    // Check if the server is already running
     if TcpStream::connect(ADDRESS).is_ok() {
-        // gbar is already running
         return;
     }
 
+    // Initialize GTK
     gtk::init().unwrap();
 
+    // Create channels for communication between threads
     let (tx, rx) = glib::MainContext::channel(glib::PRIORITY_DEFAULT);
     let (tx2, rx2) = mpsc::channel();
+
+    // Start the server and GUI
     start_server(tx, rx2);
     start_gui(rx, tx2);
 
+    // Start the GTK main loop
     gtk::main();
 }
 
@@ -55,9 +62,11 @@ fn start_server(tx: glib::Sender<Vec<String>>, rx2: mpsc::Receiver<String>) {
         let mut listener = listener.incoming();
 
         loop {
+            // Accept incoming connections
             let mut recv_stream = listener.next().unwrap().unwrap();
             let mut send_stream = listener.next().unwrap().unwrap();
 
+            // Read data from the client
             let mut args = String::new();
             recv_stream.read_to_string(&mut args).unwrap();
             if args.is_empty() {
@@ -65,9 +74,11 @@ fn start_server(tx: glib::Sender<Vec<String>>, rx2: mpsc::Receiver<String>) {
             }
             let args = args.lines().map(ToOwned::to_owned).collect();
 
+            // Send data to the GUI thread
             tx.send(args).unwrap();
             let bin = rx2.recv().unwrap();
 
+            // Send response back to the client
             send_stream.write_all(bin.as_bytes()).unwrap();
             send_stream.flush().unwrap();
         }
@@ -77,15 +88,19 @@ fn start_server(tx: glib::Sender<Vec<String>>, rx2: mpsc::Receiver<String>) {
 fn start_gui(rx: glib::Receiver<Vec<String>>, tx2: mpsc::Sender<String>) {
     let args: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec![]));
 
+    // Create the main window
     let win = Window::new(WindowType::Toplevel);
     win.set_default_size(400, 300);
 
+    // Create a vertical box to hold the input and list
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 10);
     let input = Entry::new();
     let fuzzy = ListBox::new();
 
+    // Create a fuzzy matcher
     let matcher = SkimMatcherV2::default();
 
+    // Connect the input change event to update the list
     input.connect_changed(clone!(fuzzy,args => move |ent| {
         let text = ent.get_text();
         let text = text.as_str();
@@ -98,9 +113,9 @@ fn start_gui(rx: glib::Receiver<Vec<String>>, tx2: mpsc::Sender<String>) {
             .filter_map(|imatch|Some((matcher.fuzzy_match(imatch, text)?,imatch)))
             .take(MAX_VISIBLE).collect();
 
-            matches.sort_by_key(|(k,_)|*k);
+        matches.sort_by_key(|(k,_)|*k);
 
-            matches.into_iter().rev()
+        matches.into_iter().rev()
             .for_each(|a| {
                 fuzzy.add(&Label::new(Some(&a.1)));
             });
@@ -117,6 +132,7 @@ fn start_gui(rx: glib::Receiver<Vec<String>>, tx2: mpsc::Sender<String>) {
         ));
     }));
 
+    // Function to hide the window and clear the input and list
     let hide = clone!(win,input,fuzzy =>
     move || {
         win.hide();
@@ -126,12 +142,14 @@ fn start_gui(rx: glib::Receiver<Vec<String>>, tx2: mpsc::Sender<String>) {
         });
     });
 
+    // Connect the window delete event to hide the window
     win.connect_delete_event(clone!(tx2, hide => move |_, _| {
         tx2.send("".into()).unwrap();
         hide();
         gtk::Inhibit(true)
     }));
 
+    // Connect key press events to handle Escape and Return keys
     win.connect_key_press_event(clone!(fuzzy => move |_win, key| match key.get_keyval() {
         gdk::keys::constants::Escape => {
             tx2.send("".into()).unwrap();
@@ -154,10 +172,12 @@ fn start_gui(rx: glib::Receiver<Vec<String>>, tx2: mpsc::Sender<String>) {
         _ => gtk::Inhibit(false),
     }));
 
+    // Add the input and list to the vertical box
     vbox.add(&input);
     vbox.add(&fuzzy);
     win.add(&vbox);
 
+    // Attach the receiver to update the list when new data is received
     rx.attach(None, move |new_args| {
         let mut args = args.borrow_mut();
         *args = new_args;
